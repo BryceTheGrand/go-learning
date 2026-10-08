@@ -388,15 +388,41 @@ go run ./cmd/migrate
 docker exec -it $(docker compose ps -q db) psql -U zoo -d zoo -c '\dt'
 ```
 
-Expected:
+That last line is dense on a first meeting with Docker and with Postgres, so here it is pulled apart, left to right.
+
+- **`docker exec`** runs a *new* command inside a container that is already running. A container is not a machine you log into; it is a process (here, the Postgres server), and `exec` starts a second process beside it, sharing the same filesystem namespace and network. Contrast `docker run`, which starts a *new* container. `exec` only works while the container's main process is alive - if the db container is stopped, there is nothing to exec into.
+- **`-it`** is two flags: `-i` keeps STDIN open (so you can type into the command), `-t` allocates a pseudo-terminal (so the command believes it is attached to a real terminal, with a prompt and line editing). Together they make an interactive session possible. For a one-shot `-c` query like this one, `-it` is not actually needed - dropping it gives identical output - but it is the habitual form, and you will keep reusing this exact command later without `-c`, where it matters.
+- **`$(docker compose ps -q db)`** is shell *command substitution*, not Docker syntax: the shell runs the inner command and splices its output into the outer one as text. `docker compose ps` lists the containers in this Compose project; `-q` ("quiet") prints only container IDs instead of a table; the trailing `db` filters to the service named `db` in `docker-compose.yml`. So the substitution means "whatever ID this project's `db` container currently has" - which is why the command keeps working after a `docker compose down && up -d` cycle hands the container a different ID. Compose also has a shorthand that skips the substitution entirely:
+
+  ```bash
+  docker compose exec db psql -U zoo -d zoo -c '\dt'
+  ```
+
+  `docker compose exec <service>` resolves the service for you. Both forms behave identically; this tutorial spells out the ID form because it makes clear *which* container is being entered.
+- **`psql`** is Postgres's command-line client: the program that connects to a server and sends it SQL. It is not Docker-specific and not something we are inventing - it ships inside the `postgres` image, which is the only reason `exec` can run it. If you install `psql` on your host instead, you would connect over TCP with `-h localhost -p <the host port mapped in docker-compose.yml>` and, per the auth rule below, a password.
+- **`-U zoo`** is the database *role* to connect as; **`-d zoo`** is the *database* to connect to. They match `POSTGRES_USER` and `POSTGRES_DB` in the compose file. Those are genuinely different things that happen to share the name `zoo` here: one is a login identity, the other is a named collection of tables. `-U` is required - without it psql defaults to your operating-system username, and no such role exists in this database.
+- **Why no password is asked.** Inside the container psql connects over the local Unix socket (no `-h` means "use the socket"), and the image's `pg_hba.conf` contains `local all all trust`: socket connections are admitted with no password. Network connections follow a different rule, `host all all all scram-sha-256`, which is why the app's `DATABASE_URL` carries a password and this command does not.
+- **`-c '\dt'`** means "run this one command string, then exit" instead of dropping into an interactive prompt. The string is a **meta-command**: psql shorthand beginning with a backslash, not SQL. `\dt` is "describe tables" - list them. Two constraints: a `-c` argument must be *either* pure SQL *or* a single backslash command, never a mixture; and bare `\dt` lists only objects **visible in your schema search path**, which for this connection is `public`. A table in some other schema would exist but not appear. `\dt *.*` lists every schema including Postgres's own catalogs - 111 rows on the container we checked, nearly all of them internals you will never touch.
+- **The exit status propagates**: if the command inside fails, `docker exec` exits nonzero as well, so this shape is safe to use in scripts. (`docker exec <id> false` exits 1.)
+
+Drop the `-c` and the command becomes the interactive shell, which is where you will want to spend real time poking around:
+
+```bash
+docker exec -it $(docker compose ps -q db) psql -U zoo -d zoo
+```
+
+Expected output from the `\dt` command:
 
 ```
-         List of relations
- Schema |    Name     | Type  | Owner
---------+-------------+-------+-------
- public | goose_db_version | table | zoo   <- goose's own bookkeeping table
+             List of relations
+ Schema |       Name       | Type  | Owner
+--------+------------------+-------+-------
+ public | goose_db_version | table | zoo
  public | zookeepers       | table | zoo
+(2 rows)
 ```
+
+`goose_db_version` is goose's own bookkeeping table - the record of which migration versions have been applied. It is why the tool is idempotent: on the next run it reads this table, sees version 1, and does nothing.
 
 Run `go run ./cmd/migrate` a second time: it applies nothing and reports it (`goose: no migrations to run. current version: 1` in current goose). That is the mark of a healthy migration tool: idempotent at the command level. The API server (`go run .`) still behaves exactly like Stage 1 - animals in memory, nothing database-backed. Check `http://localhost:8080/healthz` responds as before.
 
