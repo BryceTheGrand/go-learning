@@ -45,7 +45,9 @@ func main() {
 
 Same `main`/`run` split Stage 2 taught. New imports in the list: `os/signal`, `syscall`, `net/http`, and `time` - all four earn their keep below.
 
-#### Context from signals: the run() opener
+`run()` is one function, shown here in four excerpts. Each is an exact excerpt of the final file: where a block stops mid-function, that is deliberate and it has no closing brace, because the function is not finished yet. Only the last excerpt ends with the `}` that closes `run`.
+
+#### run(), part 1: context from signals
 
 ```go
 func run() error {
@@ -68,7 +70,9 @@ func run() error {
 - **`defer stop()`**: releasing the signal handler at function exit is the tidy form; this run() returns only when the server is done, so the placement is mostly ceremony (the process is exiting anyway) but costs nothing and matches the library's documented usage.
 - The config/pool block is Stage 2 verbatim, with one real change: the pool is opened with the *signal-connected* context, so a shutdown signal even cancels in-flight startup work.
 
-#### Wiring and the http.Server
+#### run(), part 2: wiring and the http.Server
+
+Continues inside `run()`, on the line directly after `defer pool.Close()` above:
 
 ```go
 	zkHandler := zookeepers.NewHandler(
@@ -95,7 +99,9 @@ func run() error {
 - **`&http.Server{...}`**: plain struct literal (with `&` for the pointer, as constructors do). gin's `router.Run(...)` hid one of these from you - it builds a zero-timeout server, which is why this stage replaces it with an explicit one. The three timeouts are the standard defensive set: `ReadTimeout` caps how long a client may take to *send* a request (protection against slowloris-style slow-senders), `WriteTimeout` caps the response write, `IdleTimeout` caps how long an idle keep-alive connection may linger. Without any of these, one client that opens connections and never talks ties up a goroutine per connection, forever.
 - **`Handler: router`**: any `*gin.Engine` is itself an `http.Handler` (a one-method interface from `net/http`: `ServeHTTP(w, r)`). This is the seam where gin plugs into the standard library - everything gin does is inside that one method call.
 
-#### The goroutine, the channel, and the select
+#### run(), part 3: the goroutine, the channel, and the select
+
+Continues inside `run()`, on the line directly after the `srv := &http.Server{...}` literal above:
 
 ```go
 	// ListenAndServe blocks until the server stops; run it concurrently.
@@ -127,7 +133,9 @@ This is the concurrency heart; read it in order:
   - `<-ctx.Done()`: every cancellable context carries an internal done-channel, and `ctx.Done()` is how you read it - this receive unblocks exactly when Ctrl+C (or SIGTERM) has arrived and `NotifyContext` cancelled the context. Note the arm receives *a struct-like signal, not a value* - `case <-ctx.Done():` discards it with unary receive.
 - This select *is* the graceful-shutdown design in miniature: whichever happens first - the server dying, or the operator asking it to die - run() finds out here, in one place.
 
-#### The shutdown itself
+#### run(), part 4: the shutdown itself
+
+The final excerpt. Continues inside `run()`, on the line directly after the `select` above; its trailing `}` closes `run`:
 
 ```go
 	// Finish in-flight requests, with a deadline that stops a hung one

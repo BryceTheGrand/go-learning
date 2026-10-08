@@ -205,6 +205,8 @@ Migrations are plain SQL files. goose is a tiny library that tracks which files 
 
 `cmd/migrate/main.go`:
 
+#### main()
+
 ```go
 package main
 
@@ -230,6 +232,10 @@ func main() {
 
 - **Why `main` is three lines.** `os.Exit(1)` terminates the process immediately, printing nothing itself - so a command should do its real work in `run()` (a *plain function*, returnable-with-error), and `main` should only: call it, print the error, exit nonzero. This is the standard Go CLI shape: logic lives in functions that *return* errors; `main` is the one place allowed to exit the process.
 
+#### run(), part 1: context, config, pool, and the first defer
+
+`run()` is one function. It is shown in two parts because each half has its own explanation, and each part is an exact excerpt of the final file - so where a block below stops mid-function, that is deliberate: the function is not finished, and the block has no closing brace:
+
 ```go
 func run() error {
 	ctx := context.Background()
@@ -248,6 +254,11 @@ func run() error {
 
 - **`context.Background()`**: the root context - "cancel me never". A command-line tool's whole life can hang off it; Stage 7 shows contexts that get cancelled per HTTP request (`c.Request.Context()`).
 - **`defer pool.Close()`** is the first `defer` in the tutorial. It schedules the close call to run **when the surrounding function returns** - however it returns: the happy path, or any of the `return fmt.Errorf(...)` exits above and below. That is the value: one line, placed right after the resource is acquired, that can never be forgotten on the error paths. `defer`s run LIFO (last deferred, first to run); Stage 7 leans on this in its transaction rollback pattern.
+- Part 1 stops at `defer pool.Close()`. There is no `return` and no closing brace yet, because `run` is only half-written at this point; part 2 picks up on the very next line.
+
+#### run(), part 2: the goose run
+
+This is the rest of that same `run()`, continuing on the line directly after `defer pool.Close()` above. Its final `}` is the brace that closes `run`:
 
 ```go
 	// goose wants a database/sql-style handle; the pgxstdlib adapter
