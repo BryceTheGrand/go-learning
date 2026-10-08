@@ -10,7 +10,11 @@ Why three layers for what is still "insert a row"? Because it is cheap now, whil
 
 As in Stage 1, each file is built piece by piece with explanations, and every section ends with the complete file so you can check your assembly.
 
+**Where these files go:** all three new files live in the **project root**, in the same directory as `main.go`, and all three declare `package main` like it does. Nothing moves into a subdirectory in this stage. The root ends up holding four `.go` files - `main.go`, `zookeepers_repository.go`, `zookeepers_service.go`, `zookeepers_handler.go` - and Stage 5 is the stage that finally splits them into `internal/` packages. Create each file as you reach its section.
+
 #### The repository: zookeepers_repository.go
+
+`zookeepers_repository.go`, in the project root:
 
 The repository is the only file that knows SQL exists. Everything it does: turn SQL rows into Go structs, and structs into rows.
 
@@ -309,6 +313,8 @@ func (r *zookeeperRepository) Delete(ctx context.Context, id int64) error {
 
 #### The service: zookeepers_service.go
 
+`zookeepers_service.go`, in the project root (beside `main.go` and `zookeepers_repository.go`):
+
 The service is the business-rules layer. It decides what counts as valid, what a database error *means* in domain terms, and what callers may not do. It never writes SQL, and it never knows about HTTP.
 
 ##### Sentinel errors
@@ -540,6 +546,8 @@ func isUniqueViolation(err error) bool {
 ```
 
 #### The handler: zookeepers_handler.go
+
+`zookeepers_handler.go`, in the project root (the third and last new file of this stage):
 
 The handler is the HTTP edge: it decodes requests, writes responses, and translates service errors to statuses. New Go concepts land here: a method with a value receiver, response DTOs, and `errors.Is`.
 
