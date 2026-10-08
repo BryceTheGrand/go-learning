@@ -278,7 +278,8 @@ This is the rest of that same `run()`, continuing on the line directly after `de
 }
 ```
 
-- **`stdlib.OpenDBFromPool(pool)`** is an adapter: goose (like many libraries) speaks the old standard `database/sql` interface, and pgx's `stdlib` package hands it a `database/sql`-shaped view of your *existing* pool. Two types, one connection budget. `defer db.Close()` closes the adapter's view, not the pool (the pgx docs are explicit about that), so the first `defer` still owns the real resource.
+- **`stdlib.OpenDBFromPool(pool)`** is an adapter: goose (like many libraries) speaks the old standard `database/sql` interface, and pgx's `stdlib` package hands it a `database/sql`-shaped view of your *existing* pool. Two types, one connection budget. `defer db.Close()` closes the adapter's view, not the pool (the pgx docs are explicit about that), so the first `defer` still owns the real resource. Note the teardown order that falls out of this: `defer`s run LIFO, so `db.Close()` runs first and `pool.Close()` second - the borrower is released before the thing it borrows from. That is the order you want, and it came for free from acquiring `db` after `pool`.
+- A related trap worth filing away now: `defer`s fire when the *enclosing function returns*, and `os.Exit` does not run them. Cleanup deferred directly in `main` before an `os.Exit(1)` would be silently skipped. This file sidesteps that because `main` only calls `run()`; by the time `os.Exit(1)` runs, `run()` has already returned and its defers have already fired.
 - **`goose.Up(db, "migrations")`** applies every not-yet-applied migration file in the directory, in filename order, and records them. `SetDialect` first tells it the vendor (it needs to know what a "now()" looks like, among other things).
 
 The complete file:
