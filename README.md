@@ -1,8 +1,9 @@
 # Zoo Service
 
 A Zoo management API: a remake of the official Go tutorial "Designing an API
-with Gin", production-shaped. Read `docs/tutorial.md` and build it yourself,
-stage by stage.
+with Gin", production-shaped. Read `docs/tutorial.md` (the overview and
+table of contents) and build it yourself, stage by stage - each stage lives
+in its own file under `docs/stages/`.
 
 ## Stack
 
@@ -18,7 +19,7 @@ Docker Compose for the database.
 5. Log in: `POST /api/v1/login` with `{"username":"admin","password":"zoo-admin-password"}`
    (the seeded admin from migration 00003; dev credential, rotate per environment)
 
-Full API documentation: the route table at the bottom of `docs/tutorial.md`.
+Full API documentation: the route table at the bottom of `docs/stages/12-makefile-recap.md`.
 
 ## Layout
 
