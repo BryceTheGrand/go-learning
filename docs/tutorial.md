@@ -70,15 +70,16 @@ Each stage is its own document. Follow them in order; every stage ends with a **
 | 10 | [Graceful shutdown](stages/10-graceful-shutdown.md) | Clean exits on Ctrl+C and SIGTERM | signals, server timeouts, the one goroutine you need |
 | 11 | [Tests](stages/11-tests.md) | Fakes at the service seam, handler tests | interfaces, `httptest`, table-driven tests |
 | 12 | [Makefile, README, recap](stages/12-makefile-recap.md) | The workflow plus honest tradeoffs and exercises | - |
+| 13 | [UUID primary keys](stages/13-uuid-primary-keys.md) | Swap every id from `bigint` to `uuid`: the migration under live foreign keys, the sweep through the code | `pgtype.UUID`, `gen_random_uuid`, expand-and-contract key change, JSON and `Scan` for ids |
 
 ## Bonus material
 
-Three optional sections that take the finished service further into ERP territory. They are not part of the linear path and nothing depends on them, but they are where the interesting database work is: constraints that make a class of bug impossible rather than detectable, a schema change on a table that already holds production data, and the first rule that spans more than one tenant.
+Three optional sections that take the finished service further into ERP territory. They are not part of the linear path and nothing depends on them, but they are where the interesting database work is: constraints that make a class of bug impossible rather than detectable, and the first rule that spans more than one tenant.
 
 | # | Section (click to open) | What you build |
 |---|---|---|
-| 13 | [Bonus: multiple zoos and enclosures](stages/13-bonus-multi-zoo-enclosures.md) | Row-level tenancy, `zoo_id` on animals, enclosures with environments and capacity, the expand/contract migration, row level security, an occupancy view |
-| 14 | [Bonus: shifts across zoos, and paying for them](stages/14-bonus-scheduling-payroll.md) | Rosters as `tstzrange` with an `EXCLUDE` constraint, recurring shift templates, feed-only-while-on-shift, time-versioned pay rates, an idempotent payroll run |
-| 15 | [Bonus: transfers, and where to go next](stages/15-bonus-transfers-and-next-steps.md) | Animal transfer as a state machine, guarded transitions, transactional capacity re-checks, roles growing into scoped permissions, an audit trail |
+| 14 | [Bonus: multiple zoos and enclosures](stages/14-bonus-multi-zoo-enclosures.md) | Row-level tenancy, `zoo_id` on animals, enclosures with environments and capacity, row level security, an occupancy view |
+| 15 | [Bonus: shifts across zoos, and paying for them](stages/15-bonus-scheduling-payroll.md) | Rosters as `tstzrange` with an `EXCLUDE` constraint, recurring shift templates, feed-only-while-on-shift, time-versioned pay rates, an idempotent payroll run |
+| 16 | [Bonus: transfers, and where to go next](stages/16-bonus-transfers-and-next-steps.md) | Animal transfer as a state machine, guarded transitions, transactional capacity re-checks, roles growing into scoped permissions, an audit trail |
 
-Every migration and query in the bonus sections was executed against Postgres 17 before being written down, including the ones that are supposed to fail, so the `ERROR` messages shown are the ones you will actually see.
+Every migration and query in Stage 13 and the bonus sections was executed against Postgres 17 before being written down, including the ones that are supposed to fail, so the `ERROR` messages shown are the ones you will actually see.

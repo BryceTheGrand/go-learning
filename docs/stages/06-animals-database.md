@@ -38,7 +38,7 @@ Three deliberate reference choices, all visible business decisions:
 
 - `animals.primary_keeper_id ... ON DELETE SET NULL`: deleting a zookeeper means their animals become *unassigned*, not broken. NULLs are how "nobody is responsible yet" is represented.
 - `feed_log.animal_id ... ON DELETE CASCADE`: deleting an animal deletes what happened to it (arguable; the wrap-up exercise suggests archiving instead).
-- `feed_log.keeper_id ... ON DELETE RESTRICT`: you may not delete a zookeeper who still has feed history. Deleting maya mid-tutorial would corrupt auditability, so Postgres refuses - and Stage 8's delete path shows the 409 that results.
+- `feed_log.keeper_id ... ON DELETE RESTRICT`: you may not delete a zookeeper who still has feed history. Deleting maya mid-tutorial would corrupt auditability, so Postgres refuses - and Stage 9's delete path shows the 409 that results.
 
 Run it (`JWT_SECRET` stays required by `config.Load`, which the migrate command sources too - keep it exported in this shell):
 
@@ -592,6 +592,10 @@ curl -s http://localhost:8080/api/v1/animals/1 -H "Authorization: Bearer $TOKEN"
 
 # filter: only those maya keeps
 curl -s "http://localhost:8080/api/v1/animals?keeper_id=1" -H "Authorization: Bearer $TOKEN"
+# [{"id":1,"name":"Tembo",...,"primary_keeper":null}]
+# note primary_keeper is null here even though maya keeps Tembo: the list query
+# skips the join (Stage 5's list mapping passes "" for the keeper name), so the
+# filter proves the keeper_id predicate matched, not that the join ran
 
 # delete the keeper; the animal survives unassigned (ON DELETE SET NULL)
 curl -s -X DELETE http://localhost:8080/api/v1/zookeepers/1 -H "Authorization: Bearer $TOKEN" -i

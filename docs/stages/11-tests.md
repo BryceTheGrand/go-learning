@@ -426,16 +426,18 @@ go test ./...
 # ?       zoo/cmd/zoo                     [no test files]
 # ?       zoo/internal/animals            [no test files]
 # ?       zoo/internal/cli                [no test files]
+# ok      zoo/internal/platform/auth      0.4s
 # ?       zoo/internal/platform/config    [no test files]
 # ?       zoo/internal/platform/database  [no test files]
 # ?       zoo/internal/platform/httpx     [no test files]
 # ?       zoo/internal/platform/logging   [no test files]
 # ?       zoo/internal/server             [no test files]
-# ok      zoo/internal/platform/auth      0.4s
 # ok      zoo/internal/zookeepers         0.6s
 ```
 
-Add `-v` to see the subtests (`t.Run` rows print as `TestServiceCreate/duplicate_from_database_surfaces_as_conflict`, `TestIssueAndVerify/expired_token_does_not_verify`, and so on - spaces in case names become underscores). For one layer of confidence when you are not sure a test guards anything, break the code and re-run, e.g. temporarily remove `if role == "" { role = "keeper" }`; the "empty role defaults to keeper" case must fail. If it does not, the test is decoration. (Undo the break.) Two cases fail, in fact, because "duplicate from database surfaces as conflict" also submits an empty role and now gets rejected as invalid input before it ever reaches the fake repository - a reminder that a table-driven table shares its path through the code, not just its assertions.
+The packages come back in import-path order, so the two `ok` lines are interleaved with the `[no test files]` ones rather than grouped at the end. `go test` also runs packages in parallel, so on a warm cache both the times and occasionally the line order differ between runs - what matters is the count: two packages with tests, both passing, eight without.
+
+Add `-v` to see the subtests (`t.Run` rows print as `TestServiceCreate/duplicate_from_database_surfaces_as_conflict`, `TestIssueAndVerify/expired_token_does_not_verify`, and so on - spaces in case names become underscores). For one layer of confidence when you are not sure a test guards anything, break the code and re-run, e.g. temporarily remove `if role == "" { role = "keeper" }`; the "empty role defaults to keeper" case must fail. If it does not, the test is decoration. (Undo the break.) Three cases fail, in fact - the one you broke, plus two you did not. "duplicate from database surfaces as conflict" also submits an empty role, and the admin-gate test's success half posts a body with no role either, so both are rejected as invalid input before they ever reach the fake repository. That is the lesson worth the minute: a shared fixture does not only share its assertions, it shares the *path* through the code, and the default you just removed sits on that path for tests that were never about it. The `-v` output is what tells you which three, and why the count was not one.
 
 ---
 

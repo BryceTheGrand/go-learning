@@ -28,9 +28,10 @@ directory, or point at one with `--config`).
 
 Full API documentation: the route table at the bottom of `docs/stages/12-makefile-recap.md`.
 
-Beyond Stage 12 there are three optional bonus sections (13-15) covering multiple
-zoos, enclosure capacity and environments, staff shifts and payroll, and animal
-transfers - see the "Bonus material" table in `docs/tutorial.md`.
+Stage 13 swaps every id for a UUID. Beyond it are three optional bonus sections
+(14-16) covering multiple zoos, enclosure capacity and environments, staff shifts
+and payroll, and animal transfers - see the "Bonus material" table in
+`docs/tutorial.md`.
 
 ## Layout
 

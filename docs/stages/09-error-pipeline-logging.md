@@ -111,7 +111,7 @@ var (
 )
 ```
 
-which means `internal/zookeepers/service.go`'s import block gains two entries (with `"net/http"` going into the stdlib group and `"zoo/internal/platform/httpx"` into the third):
+which means `internal/zookeepers/service.go`'s import block gains two entries (with `"net/http"` going into the stdlib group and `"zoo/internal/platform/httpx"` into the third) and keeps the two packages it already had - `pgx` and `internal/platform/auth` (the hashing in `Update` below still needs it):
 
 ```go
 import (
@@ -122,6 +122,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"zoo/internal/platform/auth"
 	"zoo/internal/platform/httpx"
 )
 ```
@@ -140,7 +141,7 @@ var (
 
 (Animals' error block lives in `repository.go` from Stage 6; that was the informal arrangement - this is the moment it reads oddly enough to notice it lives with the repository and nothing else in that layer returns it. It stays; the wrap-up flags the alternative, `errors/`-package-per-domain.)
 
-Two renames ripple: both domains had `errAnimalNotFound`/`errKeeperHasFeeds`-era names; every remaining use in each package updates to the `Err` names above. Specifically: `errAnimalNotFound` -> `ErrNotFound`, `errAnimalInvalid` -> `ErrInvalidInput`, `errKeeperNotFound` -> `ErrKeeperNotFound` in the animals package; `errKeeperHasFeeds` was defined but unused - it is replaced by `ErrKeeperInUse` (the naming honesty: the service decides, not the FK by itself).
+Two renames ripple, and one name disappears. The animals package's `repository.go` var block (Stage 7.2) held four `err`-prefixed sentinels, and three of them move to the `Err` names above: `errAnimalNotFound` -> `ErrNotFound`, `errAnimalInvalid` -> `ErrInvalidInput`, `errKeeperNotFound` -> `ErrKeeperNotFound` (only the initial changes). The fourth, `errKeeperHasFeeds`, was never used - the animals package never deletes a keeper, so nothing in it could ever return that error. It is *dropped* here, and the 409 it was describing appears instead as `ErrKeeperInUse` in `internal/zookeepers/service.go`, which is the package that actually raises it (the naming honesty: the service decides, not the FK by itself).
 
 And `internal/zookeepers/service.go`'s `Delete` gains the 409 promise Stage 7 made. Since the FK helper `isFKViolation` currently lives only in the animals package (private), zookeepers grows its own copy right next to `isUniqueViolation`:
 
@@ -167,7 +168,7 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 
 **Also required in this stage, or 404s become 500s:** the service methods that were pass-throughs since their stages never translate `pgx.ErrNoRows`; now that handlers no longer check it for them, both services' single-row reads and updates need it. The sweep in 9.3 collapses the *handlers'* checks - these service changes are the other half.
 
-In `zookeepers/service.go`, `Get` and `Update` change from pass-throughs to (their complete new bodies; `Update` keeps its duplicate check):
+In `zookeepers/service.go`, `Get` and `Update` change from pass-throughs to (their complete new bodies; `Update` keeps its duplicate check *and* its password hashing):
 
 ```go
 func (s *Service) Get(ctx context.Context, id int64) (Zookeeper, error) {
@@ -182,6 +183,18 @@ func (s *Service) Get(ctx context.Context, id int64) (Zookeeper, error) {
 }
 
 func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (Zookeeper, error) {
+	// Stage 4's rule, still in force: a PUT that carries a password hashes it
+	// here, one layer below the handler, so what reaches COALESCE is the hash
+	// and never the clear text. Do not drop this when you replace the body -
+	// the error handling below is new, the hashing is not.
+	if in.PasswordHash != nil {
+		hash, err := auth.HashPassword(*in.PasswordHash)
+		if err != nil {
+			return Zookeeper{}, err
+		}
+		in.PasswordHash = &hash
+	}
+
 	zk, err := s.repo.Update(ctx, id, in)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -196,7 +209,7 @@ func (s *Service) Update(ctx context.Context, id int64, in UpdateInput) (Zookeep
 }
 ```
 
-(`service.go`'s import block gains nothing - the Stage 4 version already imports pgx. If you skipped Stage 4's pgx import, add it now.)
+(This `Update` body needs no import the block above has not already given you - in particular `internal/platform/auth`, which Stage 4 put there and the hashing on the first line still uses. If you skipped Stage 4's pgx import, add it now.)
 
 In `animals/service.go`, the same treatment for `Get` and `Update`:
 

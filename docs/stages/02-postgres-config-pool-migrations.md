@@ -570,7 +570,8 @@ Notes:
 
 - File names are `<number>_<snake_case_description>.sql`. **Each version number must appear exactly once** across the whole directory: two files numbered 00001 make goose refuse to run rather than guess which one you meant. goose applies them in number order and refuses to re-run one that is already applied. `rm -rf migrations/00001*` would not be enough to "unapply" one on a database that has it; use `docker compose down -v` to start over from empty.
 - The annotations are goose's "which half is this?" markers, not SQL comments to be ignored: everything under `-- +goose Up` runs on apply, everything under `-- +goose Down` runs on rollback. A version file must contain both (or explicitly be up/down-only, which we will not need).
-- `GENERATED ALWAYS AS IDENTITY` is the modern replacement for `SERIAL`: Postgres assigns monotonically increasing integers. We use plain integers for IDs throughout this tutorial: they make `curl` examples copy-pasteable. Real-world systems frequently use UUIDs; a wrap-up note covers that swap (and its non-obvious pgx scanning caveats).
+- **goose splits the file on semicolons**, which is fine for the statements here and a trap the moment you write a function: a `CREATE FUNCTION ... $$ BEGIN ... ; ... END $$` body contains semicolons that are *not* statement terminators, and the naive split cuts it in half (Postgres then complains about an unterminated dollar-quoted string). The escape is to fence the body between `-- +goose StatementBegin` and `-- +goose StatementEnd`, which tells goose to take everything between them as one statement. You will meet this in Bonus 16; remember it now so the error is recognisable when it arrives. The annotation lines must start at column 0 (leading whitespace makes goose treat them as ordinary comments).
+- `GENERATED ALWAYS AS IDENTITY` is the modern replacement for `SERIAL`: Postgres assigns monotonically increasing integers. We use plain integers for IDs through Stage 12, because they make `curl` examples copy-pasteable - but that is a teaching convenience, not an endorsement. Stage 13 replaces every one of these keys with a UUID, and the replacement is the lesson: it is where this schema meets `pgtype.UUID` and `gen_random_uuid()`, and where a primary key that foreign keys already point at has to be changed under a table that holds data.
 - `timestamptz` is "timestamp with time zone" and is what you should always pick for time columns. It stores an instant; serialization details show up in Stage 7.
 - `password_hash` is a lie in Stage 3 and becomes true in Stage 4. We keep the column fixed from the start so the schema is stable; the code does not hash until Stage 4, and that dishonesty is part of the lesson.
 
@@ -589,6 +590,7 @@ go run ./cmd/zoo            # the root command's help (cobra also adds "completi
 go run ./cmd/zoo migrate -h # the subcommand's own help
 go run ./cmd/zoo migrate --config nope.yaml
 # 2026/10/09 10:15:02 ERROR command failed error="read config file: open nope.yaml: no such file or directory"
+# exit status 1
 go run ./cmd/zoo migrate
 # time=2026-10-09T10:15:02.123+01:00 level=INFO msg="OK   00001_create_zookeepers.sql (5.96ms)"
 # time=2026-10-09T10:15:02.124+01:00 level=INFO msg="goose: successfully migrated database to version: 1"
@@ -598,7 +600,7 @@ LOG_FORMAT=json go run ./cmd/zoo migrate
 # {"time":"2026-10-09T10:15:02.457+01:00","level":"INFO","msg":"migrations applied","dir":"migrations"}
 ```
 
-Everything after `RunE` returns is cobra's and slog's doing: the flag parsing, the help text, the `Use`/`Short` strings, the exit code, the log format. The tutorial will not explain them again. Note the two different time formats in that output: the first line is the *default* `slog` handler, which is what `Execute()` still has when `config.Load` fails before `logging.Setup` has run, and the rest are the `TextHandler` installed by 2.4, which writes RFC 3339.
+Everything after `RunE` returns is cobra's and slog's doing: the flag parsing, the help text, the `Use`/`Short` strings, the exit code, the log format. The tutorial will not explain them again. That last line of the failing run, `exit status 1`, is not the program talking - it is `go run` reporting the exit code of the binary it built and launched, which is why it appears with `go run` and not when you run a compiled `./zoo` directly. Note the two different time formats in that output: the first line is the *default* `slog` handler, which is what `Execute()` still has when `config.Load` fails before `logging.Setup` has run, and the rest are the `TextHandler` installed by 2.4, which writes RFC 3339.
 
 That `docker exec` line is dense on a first meeting with Docker and with Postgres, so here it is pulled apart, left to right.
 

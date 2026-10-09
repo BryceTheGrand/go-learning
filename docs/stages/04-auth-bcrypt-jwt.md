@@ -518,6 +518,14 @@ export JWT_SECRET="a-long-random-string-for-dev-only-not-a-real-secret"
 go run .
 ```
 
+**One consequence of making it required that the error message does not spell out:** every cobra command loads the config, so from here `zoo migrate` needs the secret too, even though applying SQL has nothing to do with signing tokens. Run it in a shell without `JWT_SECRET` and you get:
+
+```
+ERROR command failed error="jwt_secret is required: set the JWT_SECRET environment variable"
+```
+
+That is Stage 2's `PersistentPreRunE` doing what it was told - one config load for every command - and it is a known wart rather than a design: Stage 12.1 comes back to it and sketches the tidy fix (per-command config subsets). Until then, keep `JWT_SECRET` exported in any shell where you run `make`, `zoo serve` or `zoo migrate`.
+
 (`TOKEN_TTL` needs nothing: it defaults to `24h`. Set `TOKEN_TTL=5m` in an environment where you want to watch a token expire, and the login flow below starts rejecting with `invalid token` after five minutes - the single-sentinel design of `VerifyToken` means expiry is indistinguishable from any other rejection, which is the point.)
 
 **2. `zookeepers_service.go`: hash on the way in, verify on the way through.** Three concrete edits:
