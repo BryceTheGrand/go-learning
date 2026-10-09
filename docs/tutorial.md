@@ -9,21 +9,23 @@ This is a remake of the official Go tutorial [Designing an API with Gin](https:/
 
 This tutorial rebuilds the same idea as something closer to what you would actually ship: a **zoo management system** backed by PostgreSQL. Zookeepers log in with JWT bearer tokens. Keepers care for animals. Admins manage accounts. Business rules like "an animal has one primary keeper" and "feeding writes a log row and updates the animal in one transaction" are enforced in Go code and in the database.
 
+Along the way it swaps the official tutorial's gin for the stack you will meet in most production Go services: **[chi](https://github.com/go-chi/chi) for routing, [cobra](https://github.com/spf13/cobra) and [viper](https://github.com/spf13/viper) for the command line and configuration, and `log/slog` for logging**. The single most important consequence of that swap is that your handlers are ordinary `func(http.ResponseWriter, *http.Request)` functions, not functions shaped by a framework - Stage 1 makes the case for it, and by the end of the tutorial the only thing tying the HTTP layer to chi is the route table.
+
 What you will build, roughly in shape (the stages make it appear incrementally):
 
 ```
 .
-├── cmd/
-│   ├── apiserver/main.go        # composition root: wire everything, run, shut down cleanly
-│   └── migrate/main.go          # applies SQL migrations with goose
-├── internal/
-│   ├── animals/                 # animal domain: handler, service, repository, dto
-│   ├── zookeepers/              # zookeeper domain: handler, service, repository, dto
-│   ├── platform/                # config, database pool, auth, error types
-│   └── server/                  # router: mount the domains
-├── migrations/                  # plain SQL files, applied in order
-├── docker-compose.yml           # PostgreSQL for development
-└── Makefile
+|-- cmd/
+|   `-- zoo/main.go             # the thin entry point: cli.Execute()
+|-- internal/
+|   |-- cli/                    # cobra commands: serve, migrate
+|   |-- animals/                # animal domain: handler, service, repository, dto
+|   |-- zookeepers/             # zookeeper domain: handler, service, repository, dto
+|   |-- platform/               # config (viper), database pool, auth, httpx, logging
+|   `-- server/                 # router: mount the domains
+|-- migrations/                 # plain SQL files, applied in order
+|-- docker-compose.yml          # PostgreSQL for development
+`-- Makefile
 ```
 
 Two honest disclaimers up front, because you will meet them online:
@@ -36,18 +38,19 @@ Two honest disclaimers up front, because you will meet them online:
 
 ## What you need before starting
 
-- Go 1.27+ (`go version` prints something like `go version go1.27.1 darwin/arm64`)
+- Go 1.22+ (`go version` prints something like `go version go1.22.2 linux/amd64`)
 - Docker with the compose plugin (`docker compose version` prints a version)
-- A terminal and `curl` (your Mac has both)
+- A terminal and `curl`
 - Basic programming experience in any language. No Go knowledge assumed.
+
+Every dependency in this tutorial is pinned to an exact version, so the output you see matches what is printed here. The versions are also all buildable on Go 1.22; drop the `@version` suffix from a `go get` if you would rather track the newest releases.
 
 ## How to follow this tutorial
 
 - Every stage ends with a **Verify** step: run the server, fire `curl` commands, and compare what you see against the expected output. Do not skip these. They are the checkpoint for the next stage.
 - Code arrives in digestible pieces: a function or type in its own block, followed by a line-by-line explanation, and then, at the end of the section, the *complete file* as a reference - so you can confirm your assembled version. No Go knowledge is assumed, and anything new is explained when it first appears.
-- All dependencies and versions used here are mainstream de-facto tools in the Go ecosystem: [gin](https://github.com/gin-gonic/gin) (most-used Go web framework, same one the official tutorial uses), [pgx](https://github.com/jackc/pgx) (the community-recommended PostgreSQL driver, used instead of the more generic `database/sql`), [goose](https://github.com/pressly/goose) (only for tracking and applying the SQL files we write ourselves, used as a library inside `cmd/migrate`), [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt) and Go's built-in bcrypt for auth.
+- By the end, the dependencies are: [chi](https://github.com/go-chi/chi) (a router, and a thin one - see Stage 1 for why we are not using a framework), [cobra](https://github.com/spf13/cobra) and [viper](https://github.com/spf13/viper) (the command line and configuration pair you will meet in `kubectl`, `hugo`, and most Go services), Go's own `log/slog` for structured logging, [pgx](https://github.com/jackc/pgx) (the community-recommended PostgreSQL driver, used instead of the more generic `database/sql`), [goose](https://github.com/pressly/goose) (only for tracking and applying the SQL files we write ourselves, used as a library inside our own `migrate` command), [golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt) and Go's built-in bcrypt for auth.
 - If a verify step fails, the fix is almost always in the "Gotchas" callouts close to where you are.
-
 
 ## The stages
 
@@ -55,16 +58,27 @@ Each stage is its own document. Follow them in order; every stage ends with a **
 
 | # | Stage (click to open) | What you build | Go concepts introduced |
 |---|---|---|---|
-| 1 | [The official tutorial, ported to a zoo](stages/01-official-port-flat.md) | Flat API: health check + in-memory animals | modules, packages, structs, slices, functions, gin basics, struct tags |
-| 2 | [A real database](stages/02-postgres-config-pool-migrations.md) | Docker Compose Postgres, config, connection pool, migrations | two binaries, constructors, fail-fast config, pgxpool |
-| 3 | [The zookeeper domain](stages/03-zookeeper-domain-crud.md) | Zookeeper CRUD against the database | repository/service/handler layering, `ShouldBindJSON` |
-| 4 | [Real passwords and login](stages/04-auth-bcrypt-jwt.md) | bcrypt passwords + JWT + auth middleware | middleware, closures, `defer`, custom JWT claims |
-| 5 | [Restructure into `cmd/` + `internal/`](stages/05-restructure-internal.md) | The layout every serious Go server has | import paths, `internal/`, exported vs lowercase, dependency injection |
+| 1 | [The official tutorial, ported to a zoo](stages/01-official-port-flat.md) | Flat API: health check + in-memory animals | modules, packages, structs, slices, functions, chi basics, stdlib HTTP handlers, struct tags, `encoding/json` |
+| 2 | [A real database](stages/02-postgres-config-pool-migrations.md) | Docker Compose Postgres, config, connection pool, logging, a CLI, migrations | viper config, cobra commands, `RunE` and the main/run split, `defer`, slog, pgxpool |
+| 3 | [The zookeeper domain](stages/03-zookeeper-domain-crud.md) | Zookeeper CRUD against the database | repository/service/handler layering, request decoding, closures |
+| 4 | [Real passwords and login](stages/04-auth-bcrypt-jwt.md) | bcrypt passwords + JWT + auth middleware | middleware, closures, `defer`, custom JWT claims, context keys |
+| 5 | [Restructure into `cmd/` + `internal/`](stages/05-restructure-internal.md) | The layout every serious Go server has, and the server joins the CLI | import paths, `internal/`, exported vs lowercase, dependency injection, chi route groups |
 | 6 | [Animals against the database](stages/06-animals-database.md) | Joins, `NULL` handling, filters | LEFT JOIN, pointer fields for nullable columns |
 | 7 | [Business logic](stages/07-business-logic.md) | Assign a keeper, feed an animal, feed history | `context.Context` (the real one), transactions |
-| 8 | [Roles and workload](stages/08-roles-workload.md) | Admin gate, seeded admin, workload summary | middleware factories, aggregate SQL |
-| 9 | [One error pipeline](stages/09-error-pipeline-logging.md) | Typed errors + structured logging | error types, `errors.As`, wrapping with `%w`, `slog` |
+| 8 | [Roles and workload](stages/08-roles-workload.md) | Admin gate, seeded admin, workload summary | middleware factories, per-route middleware, aggregate SQL |
+| 9 | [One error pipeline](stages/09-error-pipeline-logging.md) | Typed errors + a structured request log | error types, `errors.As`, wrapping with `%w`, `slog`, response envelopes |
 | 10 | [Graceful shutdown](stages/10-graceful-shutdown.md) | Clean exits on Ctrl+C and SIGTERM | signals, server timeouts, the one goroutine you need |
 | 11 | [Tests](stages/11-tests.md) | Fakes at the service seam, handler tests | interfaces, `httptest`, table-driven tests |
 | 12 | [Makefile, README, recap](stages/12-makefile-recap.md) | The workflow plus honest tradeoffs and exercises | - |
 
+## Bonus material
+
+Three optional sections that take the finished service further into ERP territory. They are not part of the linear path and nothing depends on them, but they are where the interesting database work is: constraints that make a class of bug impossible rather than detectable, a schema change on a table that already holds production data, and the first rule that spans more than one tenant.
+
+| # | Section (click to open) | What you build |
+|---|---|---|
+| 13 | [Bonus: multiple zoos and enclosures](stages/13-bonus-multi-zoo-enclosures.md) | Row-level tenancy, `zoo_id` on animals, enclosures with environments and capacity, the expand/contract migration, row level security, an occupancy view |
+| 14 | [Bonus: shifts across zoos, and paying for them](stages/14-bonus-scheduling-payroll.md) | Rosters as `tstzrange` with an `EXCLUDE` constraint, recurring shift templates, feed-only-while-on-shift, time-versioned pay rates, an idempotent payroll run |
+| 15 | [Bonus: transfers, and where to go next](stages/15-bonus-transfers-and-next-steps.md) | Animal transfer as a state machine, guarded transitions, transactional capacity re-checks, roles growing into scoped permissions, an audit trail |
+
+Every migration and query in the bonus sections was executed against Postgres 17 before being written down, including the ones that are supposed to fail, so the `ERROR` messages shown are the ones you will actually see.

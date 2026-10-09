@@ -43,8 +43,8 @@ Three deliberate reference choices, all visible business decisions:
 Run it (`JWT_SECRET` stays required by `config.Load`, which the migrate command sources too - keep it exported in this shell):
 
 ```bash
-go run ./cmd/migrate
-docker exec -it $(docker compose ps -q db) psql -U zoo -d zoo -c '\dt'
+go run ./cmd/zoo migrate
+docker exec $(docker compose ps -q db) psql -U zoo -d zoo -c '\dt'
 ```
 
 ### 6.2 The animals package, database-backed
@@ -269,7 +269,7 @@ func deref(s *string) string {
 Three new Go ideas hide in those helpers:
 
 - **An interface**, declared for the first time: `type pgxScanner interface { ... }` is a set of method signatures, and *any type that has them* satisfies it - no registration, no "implements" keyword, Go compares shapes (this is called structural typing). `pgx.Row` (single row) and `pgx.Rows` (iterator) both have `Scan(dest ...any) error`, so both are usable as a `pgxScanner`. `Scan(dest ...any)`: the `...` makes Scan *variadic* - it accepts any number of arguments, collected into a slice of `any` internally. And `any` is simply an alias for `interface{}` - "a value of any type" - renamed in Go 1.18 for readability.
-- **`deref`**: the nil-pointer guard as a one-liner helper: if the pointer is nil, hand back the zero value `""`. The list endpoint's toResponse (below) calls it so "no keeper" becomes "empty string" at the boundary.
+- **`deref`**: the nil-pointer guard as a one-liner helper: if the pointer is nil, hand back the zero value `""`. `Get` calls it on the join's nullable `keeperUsername`, so "this animal has no keeper" arrives at the projection as an empty string rather than a nil pointer that every caller would have to check. (`List` does not need it: it runs no join, and passes `""` to the projection directly.)
 - The `List` method (in the full listing above) uses both ideas again: **`args := []any{}`** builds a slice of "any typed values" used as query parameters, and `r.pool.Query(ctx, query, args...)` passes that slice with `args...` - the *spread operator*: expand the slice into individual arguments, the inverse of variadic collection. `args` starts empty, grows only if the filter is present, and pgx matches `$1` placeholders to slice positions - which is how one query serves both filtered and unfiltered shapes without SQL string-concatenating user text.
 
 and near the top of `repository.go`, with the domain errors (service-side sentinels arrive in 6.3; this one lives with the repository for now, and Stage 9 formalizes the error pipeline):
@@ -342,8 +342,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+
+	"zoo/internal/platform/httpx"
 )
 
 type Handler struct {
@@ -358,29 +360,29 @@ func NewHandler(svc *Service) *Handler {
 // Two copies of a five-line helper is the correct amount of sharing for a
 // two-domain project; factor into a shared package when it hurts more
 // (Stage 9's error sweep shows what doing that properly looks like).
-func parseID(c *gin.Context) (int64, bool) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "id must be an integer"})
+		httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "id must be an integer"})
 		return 0, false
 	}
 	return id, true
 }
 
-func (h *Handler) List(c *gin.Context) {
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	var keeperID *int64
-	if raw := c.Query("keeper_id"); raw != "" {
+	if raw := r.URL.Query().Get("keeper_id"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "keeper_id must be an integer"})
+			httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "keeper_id must be an integer"})
 			return
 		}
 		keeperID = &id
 	}
 
-	animalsList, err := h.svc.List(c.Request.Context(), keeperID)
+	animalsList, err := h.svc.List(r.Context(), keeperID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
@@ -388,54 +390,54 @@ func (h *Handler) List(c *gin.Context) {
 	for i, a := range animalsList {
 		resp[i] = a.toResponse("") // list results skip the join
 	}
-	c.JSON(http.StatusOK, resp)
+	httpx.JSON(w, http.StatusOK, resp)
 }
 
-func (h *Handler) Get(c *gin.Context) {
-	id, ok := parseID(c)
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
 
-	a, keeperUsername, err := h.svc.Get(c.Request.Context(), id)
+	a, keeperUsername, err := h.svc.Get(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "animal not found"})
+			httpx.JSON(w, http.StatusNotFound, map[string]string{"error": "animal not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, a.toResponse(keeperUsername))
+	httpx.JSON(w, http.StatusOK, a.toResponse(keeperUsername))
 }
 
-func (h *Handler) Create(c *gin.Context) {
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string `json:"name" binding:"required"`
-		Species   string `json:"species" binding:"required"`
-		Enclosure string `json:"enclosure" binding:"required"`
+		Name      string `json:"name"`
+		Species   string `json:"species"`
+		Enclosure string `json:"enclosure"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "could not parse request body"})
 		return
 	}
 
-	a, err := h.svc.Create(c.Request.Context(), req.Name, req.Species, req.Enclosure)
+	a, err := h.svc.Create(r.Context(), req.Name, req.Species, req.Enclosure)
 	if err != nil {
 		if errors.Is(err, errAnimalInvalid) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "name, species and enclosure are required"})
+			httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "name, species and enclosure are required"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, a.toResponse(""))
+	httpx.JSON(w, http.StatusCreated, a.toResponse(""))
 }
 
-func (h *Handler) Update(c *gin.Context) {
-	id, ok := parseID(c)
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
@@ -445,44 +447,44 @@ func (h *Handler) Update(c *gin.Context) {
 		Species   *string `json:"species"`
 		Enclosure *string `json:"enclosure"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "could not parse request body"})
 		return
 	}
 
-	a, err := h.svc.Update(c.Request.Context(), id, updateInput{
+	a, err := h.svc.Update(r.Context(), id, updateInput{
 		Name:      req.Name,
 		Species:   req.Species,
 		Enclosure: req.Enclosure,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "animal not found"})
+			httpx.JSON(w, http.StatusNotFound, map[string]string{"error": "animal not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
-	c.JSON(http.StatusOK, a.toResponse(""))
+	httpx.JSON(w, http.StatusOK, a.toResponse(""))
 }
 
-func (h *Handler) Delete(c *gin.Context) {
-	id, ok := parseID(c)
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
 
-	if err := h.svc.Delete(c.Request.Context(), id); err != nil {
+	if err := h.svc.Delete(r.Context(), id); err != nil {
 		if errors.Is(err, errAnimalNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "animal not found"})
+			httpx.JSON(w, http.StatusNotFound, map[string]string{"error": "animal not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
-	c.Status(http.StatusNoContent)
+	w.WriteHeader(http.StatusNoContent)
 }
 ```
 
@@ -511,26 +513,26 @@ func (a Animal) toResponse(keeperUsername string) Response {
 
 (Note the deliberate asymmetry with the zookeepers package, whose response is `Zookeeper.Response()`: animals need the joined username handed in, so an extra parameter earns its keep. Naming things by their actual shape beats forcing uniformity.)
 
-The List handler also introduces the last unexplored gin reader, explained in place:
+The List handler also introduces the last unexplored request reader, explained in place:
 
 ```go
 	var keeperID *int64
-	if raw := c.Query("keeper_id"); raw != "" {
+	if raw := r.URL.Query().Get("keeper_id"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "keeper_id must be an integer"})
+			httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "keeper_id must be an integer"})
 			return
 		}
 		keeperID = &id
 	}
 ```
 
-- **`c.Query("keeper_id")`**: reads a *URL query parameter* (`?keeper_id=1`), the third reader after `c.Param` (path) and JSON binding (body). Returns `""` when absent.
+- **`r.URL.Query().Get("keeper_id")`**: reads a *URL query parameter* (`?keeper_id=1`), the third reader after `chi.URLParam` (path) and JSON decoding (body). `r.URL.Query()` parses the raw query string into a `url.Values` (a `map[string][]string`, because a key may repeat), and `.Get` takes the first value; it returns `""` when absent, which is exactly the "no filter" case.
 - **`keeperID = &id`**: taking the address of a local, one more time - `id` is a scoped if-declaration, so the `&id` pointer escapes into `keeperID` and survives the if (Go keeps the variable alive as long as the pointer to it exists; this is safe by design, not a dangling pointer). The pointer's nil-or-not *is* the filter's on/off switch downstream.
 
 ### 6.3 Rewire
 
-`cmd/apiserver/main.go`: replace the two animals lines
+`internal/cli/serve.go`: replace the animals wiring line
 
 ```go
 	anHandler := animals.NewHandler()
@@ -544,26 +546,32 @@ with
 	)
 ```
 
-`internal/server/router.go`: the animals group gains routes for `Update`/`Delete` and moves behind authentication, matching the zookeepers domain (mutations stay un-gated by role until Stage 8; that tightening is deliberate). The handler methods `an.Update` and `an.Delete` are new in Stage 6:
+That is the same `NewRepository` -> `NewService` -> `NewHandler` chain the zookeepers domain already had - one more reason Stage 5's composition root is the right place for it.
+
+`internal/server/router.go`: the animals group gains routes for `Update`/`Delete` and moves behind authentication. Where Stage 5's group was a bare `router.Route`, this nests the same no-prefix `router.Group` the zookeepers reads use, so `router.Use(auth.AuthMiddleware(...))` applies to every route in the block and nothing else. The handler methods `an.Update` and `an.Delete` are new in Stage 6:
 
 ```go
-	anGroup := router.Group("/api/v1/animals", auth.AuthMiddleware([]byte(secret)))
-	{
-		anGroup.GET("", an.List)
-		anGroup.GET("/:id", an.Get)
-		anGroup.POST("", an.Create)
-		anGroup.PUT("/:id", an.Update)
-		anGroup.DELETE("/:id", an.Delete)
-	}
+		router.Route("/animals", func(router chi.Router) {
+			router.Group(func(router chi.Router) {
+				router.Use(auth.AuthMiddleware([]byte(secret)))
+				router.Get("/", an.List)
+				router.Get("/{id}", an.Get)
+				router.Post("/", an.Create)
+				router.Put("/{id}", an.Update)
+				router.Delete("/{id}", an.Delete)
+			})
+		})
 ```
 
-`router.go` already imports `auth`. (Variable naming note: a local variable named `animals` would legally shadow the imported `animals` package name - the compiler only objects once code in that scope tries to reference the package. Naming the group `anGroup` avoids the ambiguity entirely, and Stage 8's rewrite keeps that name.)
+Every animals route now needs a token, `Create` included. The zookeepers group still leaves its create open until Stage 8, and there is no reason to copy that gap here. Mutations stay un-gated by *role* until Stage 8; that tightening is deliberate.
+
+`router.go` already imports `auth`.
 
 ### 6.4 Verify: relationships live in the database
 
 ```bash
 go build ./... && go vet ./...   # gate: silent
-go run ./cmd/apiserver
+go run ./cmd/zoo serve
 
 # animals now start empty; create with maya's token (export TOKEN as in 4.6)
 curl -s -X POST http://localhost:8080/api/v1/animals \
@@ -576,7 +584,7 @@ curl -i http://localhost:8080/api/v1/animals
 # HTTP/1.1 401
 
 # assign maya as Tembo's primary keeper via SQL (the API for this is Stage 7)
-docker exec -it $(docker compose ps -q db) \
+docker exec $(docker compose ps -q db) \
   psql -U zoo -d zoo -c "UPDATE animals SET primary_keeper_id = 1 WHERE id = 1"
 
 curl -s http://localhost:8080/api/v1/animals/1 -H "Authorization: Bearer $TOKEN"
@@ -596,4 +604,4 @@ That last transition - delete a zookeeper, watch the animal's keeper turn to `nu
 
 ---
 
-[Stage 5](05-restructure-internal.md)  ·  [Overview](../tutorial.md)  ·  [Stage 7](07-business-logic.md)
+[Stage 5](05-restructure-internal.md)  |  [Overview](../tutorial.md)  |  [Stage 7](07-business-logic.md)

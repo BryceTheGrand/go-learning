@@ -2,15 +2,19 @@
 
 CRUD is bookkeeping; the routes in this stage are why the zookeeper domain and the animals domain exist at all:
 
-- `PUT /api/v1/animals/:id/keeper` - assign (or clear) an animal's primary keeper, admin-side.
-- `POST /api/v1/animals/:id/feed` - record a feeding; writes a feed-log row *and* updates the animal's `last_fed_at` in one transaction.
-- `GET /api/v1/animals/:id/feed` - the feeding history (latest 20).
+- `PUT /api/v1/animals/{id}/keeper` - assign (or clear) an animal's primary keeper, admin-side.
+- `POST /api/v1/animals/{id}/feed` - record a feeding; writes a feed-log row *and* updates the animal's `last_fed_at` in one transaction.
+- `GET /api/v1/animals/{id}/feed` - the feeding history (latest 20).
 
 ### 7.1 The one Go context to know: `context.Context`
 
-Every database call your code makes takes a `context.Context` as its first parameter. It is Go's standard signal channel for "the caller stopped caring": when a client hangs up mid-request, gin closes the request's context, and every query that request started is cancelled by pgx itself. That is the payoff - cancellation you get for free by threading one value through.
+Every database call your code makes takes a `context.Context` as its first parameter. It is Go's standard signal channel for "the caller stopped caring": when a client hangs up mid-request, the standard library's HTTP server cancels that request's context, and every query the request started is cancelled by pgx itself. That is the payoff - cancellation you get for free by threading one value through.
 
-Where does it come from? **From gin, once per request, in the handler: `c.Request.Context()`.** `gin.Context` - what handlers receive - is *gin's* per-request scratch pad (params, JSON, middleware state). It happens to be named the same thing as Go's cancellation context, and confusing the two is the single most common gin mistake. Rule: gin's context never leaves your handler; Go's `context.Context` is what you pass into `service` and `repository` calls.
+Where does it come from? **From `net/http`, once per request, in the handler: `r.Context()`.** Every `*http.Request` carries a `context.Context` of its own, created by the server when it accepted the connection and cancelled the moment the client disconnects or the handler returns. chi adds nothing here: it does not wrap the request in an object of its own. A chi handler receives the same `*http.Request` the standard library built, so `r.Context()` is Go's context, full stop.
+
+That last sentence is worth dwelling on, because it is one of the things this port buys. The framework this tutorial replaced had two different things called "context": gin's `*gin.Context`, the per-request scratch pad handlers receive (params, JSON, middleware state), and Go's `context.Context`, the cancellation channel you pass into `service` and `repository` layers. They shared a name and nothing else, and confusing them was the single most common gin mistake. chi has no such object. There is exactly one context type in this codebase, it is the standard library's, and `r.Context()` is the only way to reach it.
+
+Rule: the request's context never leaves your handler. You read `r.Context()` there and hand it to the `service` and `repository` calls; nothing below the handler ever sees an `*http.Request`.
 
 ### 7.2 Repository additions (internal/animals/repository.go)
 
@@ -18,10 +22,10 @@ Append to `repository.go`. New first, since assignment depends on one type guard
 
 ```go
 var (
-	errAnimalNotFound  = errors.New("animal not found")
-	errAnimalInvalid   = errors.New("name, species and enclosure must be non-empty")
-	errKeeperNotFound  = errors.New("keeper not found")
-	errKeeperHasFeeds  = errors.New("keeper has feed history and cannot be deleted")
+	errAnimalNotFound = errors.New("animal not found")
+	errAnimalInvalid  = errors.New("name, species and enclosure must be non-empty")
+	errKeeperNotFound = errors.New("keeper not found")
+	errKeeperHasFeeds = errors.New("keeper has feed history and cannot be deleted")
 )
 ```
 
@@ -151,7 +155,7 @@ func nullableString(s string) any {
 }
 ```
 
-Add `"time"` to the import block if your edition of the file does not have it (the Stage 6 listing did).
+The import block already has `"time"` in it (Stage 6 listed it for the `Animal` struct's timestamp fields, and `FeedEntry.FedAt` is the same type), so this addition needs no new import.
 
 Two design notes worth their prose:
 
@@ -224,7 +228,7 @@ func (s *Service) FeedHistory(ctx context.Context, animalID int64) ([]FeedEntry,
 ```
 
 - **`if _, _, err := s.repo.Get(...)`**: the blank identifier at work inside a multi-value unpack - Get returns three values, the caller wants *neither* result, only the error. Writing `_, _, err := ...` discards both results positionally; `if err := s.repo.Get(...)` alone would not compile, because Go does not let you silently drop multi-value results.
-- **`nil, nil, err`**: three return slots, the error last, `nil` in both result positions (nil for the slice, empty string... no - for the `string` third slot the fail-return is `""`, shown above in `AssignKeeper`; `FeedHistory`'s two slice slots take `nil`). Each fail-return must name *every* slot; that is the price of the explicit convention, paid again here.
+- **`nil, nil, err`**: three return slots to fill, so a failure has to name all three - the error last, and a zero value in each result position. `FeedHistory` returns `([]FeedEntry, []string, error)`, so its fail-return is `nil, nil, err`; `AssignKeeper` returns `(Animal, string, error)`, so its fail-return is the *zero value* `Animal{}`, `""`, `err` (shown above). Getting this wrong in the other direction - returning a real value alongside an error - is the mistake the convention exists to prevent: a caller who checks the error must never also have to wonder whether the value means anything. Each fail-return names *every* slot, and that is the price of the explicit convention, paid again here.
 
 Extend the file's imports and add the FK helper next to `isUniqueViolation` (which lives in the zookeepers package; this is its animals-domain twin - if the repetition starts to itch, that discomfort is exactly Stage 9's opening sentence):
 
@@ -240,13 +244,13 @@ func isFKViolation(err error) bool {
 
 ### 7.4 Handler additions (internal/animals/handler.go)
 
-Three methods on the existing `Handler`, plus their error-mapping helper. The file's import block gains `"zoo/internal/platform/auth"` (first use in this package). Note the `claims, ok := auth.ClaimsFrom(c)` shape: the middleware ran, so `ok` should always be true; the `if` is defensive against wiring mistakes (a route mounted outside the authed group), and it fails loudly rather than panicking.
+Three methods on the existing `Handler`, plus their error-mapping helper. The file's import block gains `"zoo/internal/platform/auth"` (first use in this package). Note the `claims, ok := auth.ClaimsFrom(r.Context())` shape: the middleware ran, so `ok` should always be true; the `if` is defensive against wiring mistakes (a route mounted outside the authed group), and it fails loudly rather than panicking.
 
 ```go
-// AssignKeeper: PUT /api/v1/animals/:id/keeper, body {"keeper_id": 7}
+// AssignKeeper: PUT /api/v1/animals/{id}/keeper, body {"keeper_id": 7}
 // or {"keeper_id": null} to unassign.
-func (h *Handler) AssignKeeper(c *gin.Context) {
-	id, ok := parseID(c)
+func (h *Handler) AssignKeeper(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
@@ -254,31 +258,31 @@ func (h *Handler) AssignKeeper(c *gin.Context) {
 	var req struct {
 		KeeperID *int64 `json:"keeper_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "could not parse request body"})
 		return
 	}
 
 	// The middleware ran, so claims exist; a role check using them
 	// arrives in Stage 8.
-	_, ok = auth.ClaimsFrom(c)
+	_, ok = auth.ClaimsFrom(r.Context())
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "no auth in context"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "no auth in context"})
 		return
 	}
 
-	a, keeperUsername, err := h.svc.AssignKeeper(c.Request.Context(), id, req.KeeperID)
+	a, keeperUsername, err := h.svc.AssignKeeper(r.Context(), id, req.KeeperID)
 	if err != nil {
-		h.writeError(c, err)
+		h.writeError(w, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, a.toResponse(keeperUsername))
+	httpx.JSON(w, http.StatusOK, a.toResponse(keeperUsername))
 }
 
-// Feed: POST /api/v1/animals/:id/feed, optional body {"note": "..."}
-func (h *Handler) Feed(c *gin.Context) {
-	id, ok := parseID(c)
+// Feed: POST /api/v1/animals/{id}/feed, optional body {"note": "..."}
+func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
@@ -286,28 +290,28 @@ func (h *Handler) Feed(c *gin.Context) {
 	var req struct {
 		Note string `json:"note"`
 	}
-	// An empty body must not fail: note is optional. ShouldBindJSON with
-	// io.EOF (curl with no -d at all) is not a client error here.
-	if c.Request.ContentLength > 0 {
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// An empty body must not fail: note is optional. Decoding an empty
+	// body (io.EOF - curl with no -d at all) is not a client error here.
+	if r.ContentLength > 0 {
+		if err := httpx.Decode(r, &req); err != nil {
+			httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": "could not parse request body"})
 			return
 		}
 	}
 
-	claims, ok := auth.ClaimsFrom(c)
+	claims, ok := auth.ClaimsFrom(r.Context())
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "no auth in context"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "no auth in context"})
 		return
 	}
 
-	entry, err := h.svc.Feed(c.Request.Context(), id, claims.ZookeeperID, req.Note)
+	entry, err := h.svc.Feed(r.Context(), id, claims.ZookeeperID, req.Note)
 	if err != nil {
-		h.writeError(c, err)
+		h.writeError(w, err)
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	httpx.JSON(w, http.StatusCreated, map[string]any{
 		"id":        entry.ID,
 		"animal_id": entry.AnimalID,
 		"keeper_id": entry.KeeperID,
@@ -316,30 +320,30 @@ func (h *Handler) Feed(c *gin.Context) {
 	})
 }
 
-// FeedHistory: GET /api/v1/animals/:id/feed -> latest 20
-func (h *Handler) FeedHistory(c *gin.Context) {
-	id, ok := parseID(c)
+// FeedHistory: GET /api/v1/animals/{id}/feed -> latest 20
+func (h *Handler) FeedHistory(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
 	if !ok {
 		return
 	}
 
-	entries, usernames, err := h.svc.FeedHistory(c.Request.Context(), id)
+	entries, usernames, err := h.svc.FeedHistory(r.Context(), id)
 	if err != nil {
-		h.writeError(c, err)
+		h.writeError(w, err)
 		return
 	}
 
-	resp := make([]gin.H, len(entries))
+	resp := make([]map[string]any, len(entries))
 	for i, e := range entries {
-		resp[i] = gin.H{
+		resp[i] = map[string]any{
 			"id":        e.ID,
 			"animal_id": e.AnimalID,
 			"fed_at":    e.FedAt,
 			"note":      e.Note,
-			"keeper":    gin.H{"id": e.KeeperID, "username": usernames[i]},
+			"keeper":    map[string]any{"id": e.KeeperID, "username": usernames[i]},
 		}
 	}
-	c.JSON(http.StatusOK, resp)
+	httpx.JSON(w, http.StatusOK, resp)
 }
 ```
 
@@ -349,14 +353,14 @@ func (h *Handler) FeedHistory(c *gin.Context) {
 // writeError centralizes sentinel -> status-code mapping for this domain.
 // Stage 9 replaces it with the shared error pipeline; if you compare the
 // two when you get there, notice this is the exact code being factored out.
-func (h *Handler) writeError(c *gin.Context, err error) {
+func (h *Handler) writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errAnimalNotFound) || errors.Is(err, errKeeperNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		httpx.JSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 	case errors.Is(err, errAnimalInvalid):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.JSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 	default:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		httpx.JSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 }
 ```
@@ -369,25 +373,29 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 Replace the animals group with:
 
 ```go
-	anGroup := router.Group("/api/v1/animals", auth.AuthMiddleware([]byte(secret)))
-	{
-		anGroup.GET("", an.List)
-		anGroup.GET("/:id", an.Get)
-		anGroup.POST("", an.Create)
-		anGroup.PUT("/:id", an.Update)
-		anGroup.DELETE("/:id", an.Delete)
-		anGroup.PUT("/:id/keeper", an.AssignKeeper)
-		anGroup.POST("/:id/feed", an.Feed)
-		anGroup.GET("/:id/feed", an.FeedHistory)
-	}
+		router.Route("/animals", func(router chi.Router) {
+			router.Group(func(router chi.Router) {
+				router.Use(auth.AuthMiddleware([]byte(secret)))
+				router.Get("/", an.List)
+				router.Get("/{id}", an.Get)
+				router.Post("/", an.Create)
+				router.Put("/{id}", an.Update)
+				router.Delete("/{id}", an.Delete)
+				router.Put("/{id}/keeper", an.AssignKeeper)
+				router.Post("/{id}/feed", an.Feed)
+				router.Get("/{id}/feed", an.FeedHistory)
+			})
+		})
 ```
+
+Stage 6's group already carried the auth middleware, so this is the same block with three more routes in it - the `/{id}/keeper` and `/{id}/feed` patterns slot in beside `/{id}` without any ordering concerns, because chi's matcher is a trie over the whole path, not a first-match-wins list.
 
 ### 7.6 Verify: the business rules, exercised
 
 Stage 6's script deleted maya. Log in as sam (still there, username `sam`, password `elephant-road`) and keep that as `$TOKEN`:
 
 ```bash
-go build ./... && go vet ./... && go run ./cmd/apiserver
+go build ./... && go vet ./... && go run ./cmd/zoo serve
 
 export TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/login \
   -H "Content-Type: application/json" \
@@ -409,19 +417,23 @@ curl -s -X PUT http://localhost:8080/api/v1/animals/1/keeper \
 curl -s -X POST http://localhost:8080/api/v1/animals/1/feed \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"note":"morning hay and mineral block"}'
-# {"id":1,"animal_id":1,"keeper_id":2,"fed_at":"2026-...","note":"morning hay and mineral block"}
+# {"animal_id":1,"fed_at":"2026-...","id":1,"keeper_id":2,"note":"morning hay and mineral block"}
+# note the key order: this body is built from a map, and encoding/json sorts
+# map keys alphabetically, so "animal_id" leads and "id" is third. Stage 1
+# mentioned this; here is where it becomes visible. A struct response would
+# keep the order you wrote instead.
 
 # feed again with no body at all: optional note must not break
 curl -s -X POST http://localhost:8080/api/v1/animals/1/feed -H "Authorization: Bearer $TOKEN"
-# {"id":2,...,"note":null}
+# {"animal_id":1,"fed_at":"2026-...","id":2,"keeper_id":2,"note":null}
 
 # last_fed_at is stamped (the transaction's second statement)
 curl -s http://localhost:8080/api/v1/animals/1 -H "Authorization: Bearer $TOKEN"
 # ... "last_fed_at":"2026-..." (matches the newest fed_at)
 
-# history
+# history (newest first; each entry carries its keeper, keys again alphabetical)
 curl -s http://localhost:8080/api/v1/animals/1/feed -H "Authorization: Bearer $TOKEN"
-# [ {"id":2,...,"note":null}, {"id":1,...,"note":"morning hay and mineral block"} ]
+# [ {"animal_id":1,...,"id":2,"note":null}, {"animal_id":1,...,"id":1,"note":"morning hay and mineral block"} ]
 # both entries carry "keeper":{"id":2,"username":"sam"}
 
 # unknown animal's feed -> 404
@@ -435,10 +447,10 @@ curl -s -X PUT http://localhost:8080/api/v1/animals/1/keeper \
 # primary_keeper back to null
 ```
 
-> **A subtlety you just watched happen:** maya was deleted in Stage 6, yet a request bearing maya's token was still *accepted* by the server until she fed an animal and Postgres rejected the `keeper_id`. JWTs are self-contained: the server verifies the signature, not the account's existence. The feed endpoint returned "keeper not found" only because the FK caught it. Real systems add revocation (a checked token deny-list, very short expiry + refresh tokens, or a DB check per request); the wrap-up lists it as the first exercise. Know this trade exists before one bites you.
+> **A subtlety worth pausing on, because Stage 6 already demonstrated it:** maya was deleted there by a request carrying maya's own, still-valid token, and the API accepted it. JWTs are self-contained - the server verifies the signature, not the account's existence - so a token outlives the account it names. Nothing in this stage notices either; the "keeper not found" above comes from an explicit existence check, and if you try the destructive paragraph at the end of this section, the error you get is Postgres rejecting a `keeper_id` that no longer exists, not the middleware catching anything. Real systems add revocation (a checked token deny-list, very short expiry plus refresh tokens, or a DB check per request); the wrap-up lists it as the first exercise. Know this trade exists before one bites you.
 
-If you are feeling destructive: create a keeper, feed an animal as them, then delete them via `DELETE /api/v1/zookeepers/:id` - Postgres's RESTRICT turns the delete into an error the API reports as 500 today; remember the case, Stage 9 gives it its real status code (409 Conflict).
+If you are feeling destructive: create a keeper, feed an animal as them, then delete them via `DELETE /api/v1/zookeepers/{id}` - Postgres's RESTRICT turns the delete into an error the API reports as 500 today; remember the case, Stage 9 gives it its real status code (409 Conflict).
 
 ---
 
-[Stage 6](06-animals-database.md)  ·  [Overview](../tutorial.md)  ·  [Stage 8](08-roles-workload.md)
+[Stage 6](06-animals-database.md)  |  [Overview](../tutorial.md)  |  [Stage 8](08-roles-workload.md)

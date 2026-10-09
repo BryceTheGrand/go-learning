@@ -1,0 +1,8 @@
+# PhpStorm / IntelliJ project files. A .gitignore inside .idea/ cannot ignore
+# .idea/ itself - patterns are relative to where the .gitignore lives - so this
+# rule has to sit at the repository root.
+.idea/
+
+# `go build ./cmd/zoo` writes this binary into the repository root. See
+# docs/stages/05-restructure-internal.md, which tells readers to ignore it.
+zoo

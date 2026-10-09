@@ -18,7 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"zoo/internal/platform/auth"
-	"zoo/internal/platform/httperrors"
+	"zoo/internal/platform/httpx"
 )
 
 // Repository is the interface the service consumes, defined in the file
@@ -44,7 +44,7 @@ func NewService(repo Repository) *Service {
 }
 ```
 
-The rest of the file is untouched - the header above already carries the one real change, the `Service` struct's field going from `*dbRepository` to `Repository`. `cmd/apiserver/main.go` still compiles unchanged: `*dbRepository` satisfies the interface without a cast, because the method sets match exactly. The unexported name on the concrete type works because callers never name it - they receive it from `NewRepository` and hand it to `NewService` in the same expression.
+The rest of the file is untouched - the header above already carries the one real change, the `Service` struct's field going from `*dbRepository` to `Repository`. `internal/cli/serve.go` still compiles unchanged: `*dbRepository` satisfies the interface without a cast, because the method sets match exactly. The unexported name on the concrete type works because callers never name it - they receive it from `NewRepository` and hand it to `NewService` in the same expression.
 
 ### 11.2 The fake: internal/zookeepers/service_test.go
 
@@ -57,7 +57,7 @@ import (
 	"strings"
 	"testing"
 
-	"zoo/internal/platform/httperrors"
+	"zoo/internal/platform/httpx"
 	"zoo/internal/zookeepers"
 )
 
@@ -65,8 +65,8 @@ import (
 // Each field is a lever a test case sets; only the methods the real tests
 // exercise are meaningfully implemented.
 type fakeRepository struct {
-	created    []zookeepers.Zookeeper
-	createErr  error
+	created   []zookeepers.Zookeeper
+	createErr error
 
 	byUsername map[string]zookeepers.Zookeeper // canned GetByUsername
 }
@@ -81,7 +81,7 @@ func (f *fakeRepository) Create(_ context.Context, kz zookeepers.Zookeeper) (zoo
 }
 
 func (f *fakeRepository) Get(_ context.Context, _ int64) (zookeepers.Zookeeper, error) {
-	return zookeepers.Zookeeper{}, httperrors.NotFound("not used by these tests")
+	return zookeepers.Zookeeper{}, httpx.NotFound("not used by these tests")
 }
 
 func (f *fakeRepository) GetByUsername(_ context.Context, username string) (zookeepers.Zookeeper, error) {
@@ -123,30 +123,30 @@ func TestServiceCreate(t *testing.T) {
 		wantStored bool
 	}{
 		{
-			name:       "empty role defaults to keeper",
-			username:   "maya", password: "pw1", role: "",
-			wantRole:   "keeper", wantStored: true,
+			name:     "empty role defaults to keeper",
+			username: "maya", password: "pw1", role: "",
+			wantRole: "keeper", wantStored: true,
 		},
 		{
-			name:       "explicit admin stored",
-			username:   "maya", password: "pw1", role: "admin",
-			wantRole:   "admin", wantStored: true,
+			name:     "explicit admin stored",
+			username: "maya", password: "pw1", role: "admin",
+			wantRole: "admin", wantStored: true,
 		},
 		{
-			name:       "empty password rejected",
-			username:   "maya", password: "", role: "",
-			wantErr:    zookeepers.ErrInvalidInput,
+			name:     "empty password rejected",
+			username: "maya", password: "", role: "",
+			wantErr: zookeepers.ErrInvalidInput,
 		},
 		{
-			name:       "bad role rejected",
-			username:   "maya", password: "pw1", role: "visitor",
-			wantErr:    zookeepers.ErrInvalidInput,
+			name:     "bad role rejected",
+			username: "maya", password: "pw1", role: "visitor",
+			wantErr: zookeepers.ErrInvalidInput,
 		},
 		{
-			name:       "duplicate from database surfaces as conflict",
-			username:   "maya", password: "pw1", role: "",
-			repoErr:    duplicateErr(),
-			wantErr:    zookeepers.ErrDuplicateUsername,
+			name:     "duplicate from database surfaces as conflict",
+			username: "maya", password: "pw1", role: "",
+			repoErr: duplicateErr(),
+			wantErr: zookeepers.ErrDuplicateUsername,
 		},
 	}
 
@@ -193,7 +193,7 @@ func duplicateErr() error {
 }
 ```
 
-Two things to learn from the failures your table should catch: the default-role case guards Stage 3's `if role == ""` behavior, so nobody "simplifies" it away; the duplicate case proves the pg error translation is reachable through the service call path (the fake trips the branch by handing the service the very error the real repository's unique-violation branch would produce - the translation itself is exercised by the curl scripts, and Stage 12's exercises suggest a repository-level test to pin it).
+Two things to learn from the failures your table should catch: the default-role case guards Stage 3's `if role == ""` behavior, so nobody "simplifies" it away; and the duplicate case pins what the *service* does when the repository reports a duplicate. What it does not pin is the translation that produces that report - the fake hands back exactly the sentinel the real unique-violation branch would return, so the SQLSTATE-to-domain mapping is exercised by the curl scripts rather than here, and Stage 12's exercises suggest a repository-level test to pin it. A fake that pretended to be Postgres would be testing itself.
 
 Note what a fake is allowed to be: it implements only what these tests call (`Get` even returns a stub error, because no test exercises `Get` here), and the compiler enforces that it stays a truthful `Repository`.
 
@@ -211,14 +211,13 @@ The Go testing vocabulary in that file, since it is the first test file of the t
 package zookeepers_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/go-chi/chi/v5"
 
 	"zoo/internal/platform/auth"
 	"zoo/internal/zookeepers"
@@ -239,34 +238,40 @@ func signToken(t *testing.T, id int64, username, role string) string {
 	return token
 }
 
-// newTestEngine mirrors the routes the router mounts for this domain,
+// newTestRouter mirrors the routes the router mounts for this domain,
 // gated the same way (list behind auth, create behind auth + admin,
 // login open). If server/router.go's gating changes, keep this aligned;
 // the wrap-up suggests a route-table test as the exercise that keeps
 // them honest mechanically.
-func newTestEngine(t *testing.T, svc *zookeepers.Service) *gin.Engine {
+//
+// It returns http.Handler, not *chi.Mux: the tests only ever call
+// ServeHTTP, and the narrower type is all they need.
+func newTestRouter(t *testing.T, svc *zookeepers.Service) http.Handler {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 
-	router := gin.New()
+	router := chi.NewRouter()
 	authMiddleware := auth.AuthMiddleware([]byte(testSecret))
 	requireAdmin := auth.RequireRole("admin")
 	h := zookeepers.NewHandler(svc, testSecret, time.Hour)
 
-	group := router.Group("/api/v1/zookeepers")
-	{
-		group.POST("", authMiddleware, requireAdmin, h.Create)
+	router.Route("/api/v1", func(router chi.Router) {
+		// Mirroring the real router: login mounts at the API root, not
+		// inside the zookeepers group.
+		router.Post("/login", h.Login)
 
-		authed := group.Group("", authMiddleware)
-		{
-			authed.GET("", h.List)
-			authed.GET("/:id", h.Get)
-		}
-	}
+		router.Route("/zookeepers", func(router chi.Router) {
+			router.Group(func(router chi.Router) {
+				router.Use(authMiddleware, requireAdmin)
+				router.Post("/", h.Create)
+			})
 
-	// Mirroring the real router: login mounts at the API root, not inside
-	// the zookeepers group.
-	router.POST("/api/v1/login", h.Login)
+			router.Group(func(router chi.Router) {
+				router.Use(authMiddleware)
+				router.Get("/", h.List)
+				router.Get("/{id}", h.Get)
+			})
+		})
+	})
 
 	return router
 }
@@ -297,14 +302,14 @@ func TestGetZookeeperAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeRepository{}
 			svc := zookeepers.NewService(repo)
-			engine := newTestEngine(t, svc)
+			router := newTestRouter(t, svc)
 
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/zookeepers", nil)
 			if tc.authHeader != "" {
 				req.Header.Set("Authorization", tc.authHeader)
 			}
 			rec := httptest.NewRecorder()
-			engine.ServeHTTP(rec, req)
+			router.ServeHTTP(rec, req)
 
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %q", rec.Code, tc.wantStatus, rec.Body.String())
@@ -318,14 +323,14 @@ func TestCreateRequiresAdminRole(t *testing.T) {
 		"maya": {ID: 1, Username: "maya", PasswordHash: mustHash(t, "pw1"), Role: "keeper"},
 	}}
 	svc := zookeepers.NewService(repo)
-	engine := newTestEngine(t, svc)
+	router := newTestRouter(t, svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/zookeepers",
 		strings.NewReader(`{"username":"someone","password":"pw2"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", bearer(signToken(t, 1, "maya", "keeper")))
 	rec := httptest.NewRecorder()
-	engine.ServeHTTP(rec, req)
+	router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d (keeper cannot create); body = %q",
@@ -338,7 +343,7 @@ func TestCreateRequiresAdminRole(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", bearer(signToken(t, 2, "admin", "admin")))
 	rec = httptest.NewRecorder()
-	engine.ServeHTTP(rec, req)
+	router.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %q", rec.Code, http.StatusCreated, rec.Body.String())
@@ -359,16 +364,6 @@ func mustHash(t *testing.T, password string) string {
 		t.Fatalf("HashPassword: %v", err)
 	}
 	return hash
-}
-
-// decodeJSON parses a handler response body in the tests that check shapes
-// beyond status codes; unused in this file's assertions, which pin codes.
-func decodeJSON(body string) (map[string]any, error) {
-	var out map[string]any
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 ```
 
@@ -421,26 +416,27 @@ func TestIssueAndVerify(t *testing.T) {
 
 Two remaining new words in the httptest file, worth their lines:
 
-- **`t.Helper()`**: declares that the calling function (`signToken`, `mustHash`, `newTestEngine`) is *assistance code*, not a test. On failure, the reported line number points at the actual test, not at inside the helper - small feature, large debugging payoff once helpers multiply.
-- **The `httptest` loop**: `httptest.NewRequest` builds a real `*http.Request` with no network in sight; `httptest.NewRecorder` gives you a writer object that *records* status and body instead of sending bytes anywhere; and `engine.ServeHTTP(rec, req)` runs the request through the whole routing + middleware + handler stack synchronously, in-process. You assert on `rec.Code` and `rec.Body`. This is why handler tests are fast and hermetic: the router is real, the network is simulated. Note that the negative-TTL case (`ttl: -time.Minute`) works because `IssueToken` stamps `ExpiresAt` in the past, and verification sees it - no clock mocking, no sleeps.
+- **`t.Helper()`**: declares that the calling function (`signToken`, `mustHash`, `newTestRouter`) is *assistance code*, not a test. On failure, the reported line number points at the actual test, not at inside the helper - small feature, large debugging payoff once helpers multiply.
+- **The `httptest` loop**: `httptest.NewRequest` builds a real `*http.Request` with no network in sight; `httptest.NewRecorder` gives you a writer object that *records* status and body instead of sending bytes anywhere; and `router.ServeHTTP(rec, req)` runs the request through the whole routing + middleware + handler stack synchronously, in-process. You assert on `rec.Code` and `rec.Body`. This is why handler tests are fast and hermetic: the router is real, the network is simulated. Notice there is no test mode to set - the gin version of this file opened with `gin.SetMode(gin.TestMode)`, and that line has simply vanished. It existed because gin's engine behaves differently outside production mode; the router under test here is an ordinary `http.Handler`, and `httptest` never needed to know which router produced it. Note that the negative-TTL case (`ttl: -time.Minute`) works because `IssueToken` stamps `ExpiresAt` in the past, and verification sees it - no clock mocking, no sleeps.
 
 ### 11.4 Verify: `go test ./...`
 
 ```bash
 go test ./...
-# ok      zoo/internal/platform/auth      0.4s
-# ok      zoo/internal/zookeepers         0.6s
-# ?       zoo/cmd/apiserver               [no test files]
-# ?       zoo/cmd/migrate                 [no test files]
+# ?       zoo/cmd/zoo                     [no test files]
 # ?       zoo/internal/animals            [no test files]
+# ?       zoo/internal/cli                [no test files]
 # ?       zoo/internal/platform/config    [no test files]
 # ?       zoo/internal/platform/database  [no test files]
-# ?       zoo/internal/platform/httperrors [no test files]
+# ?       zoo/internal/platform/httpx     [no test files]
+# ?       zoo/internal/platform/logging   [no test files]
 # ?       zoo/internal/server             [no test files]
+# ok      zoo/internal/platform/auth      0.4s
+# ok      zoo/internal/zookeepers         0.6s
 ```
 
-Add `-v` to see the subtests (`t.Run` rows print as `TestServiceCreate/duplicate_from_database_surfaces_as_conflict`, `TestIssueAndVerify/expired_token_does_not_verify`, and so on - spaces in case names become underscores). For one layer of confidence when you are not sure a test guards anything, break the code and re-run, e.g. temporarily remove `if role == "" { role = "keeper" }`; the "empty role defaults to keeper" case must fail. If it does not, the test is decoration. (Undo the break.)
+Add `-v` to see the subtests (`t.Run` rows print as `TestServiceCreate/duplicate_from_database_surfaces_as_conflict`, `TestIssueAndVerify/expired_token_does_not_verify`, and so on - spaces in case names become underscores). For one layer of confidence when you are not sure a test guards anything, break the code and re-run, e.g. temporarily remove `if role == "" { role = "keeper" }`; the "empty role defaults to keeper" case must fail. If it does not, the test is decoration. (Undo the break.) Two cases fail, in fact, because "duplicate from database surfaces as conflict" also submits an empty role and now gets rejected as invalid input before it ever reaches the fake repository - a reminder that a table-driven table shares its path through the code, not just its assertions.
 
 ---
 
-[Stage 10](10-graceful-shutdown.md)  ·  [Overview](../tutorial.md)  ·  [Stage 12](12-makefile-recap.md)
+[Stage 10](10-graceful-shutdown.md)  |  [Overview](../tutorial.md)  |  [Stage 12](12-makefile-recap.md)
